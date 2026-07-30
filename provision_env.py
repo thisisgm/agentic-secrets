@@ -106,7 +106,7 @@ def _require(cfg: dict, key: str, path: Path) -> str:
     if _looks_like_placeholder(value):
         raise ConfigError(
             f"{path}: `{key}` is still the placeholder ({value!r}). "
-            "Fill in your own value -- see the README bootstrap section."
+            "Fill in your own value -- see the README Setup section."
         )
     return value
 

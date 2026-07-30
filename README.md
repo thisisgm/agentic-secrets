@@ -4,7 +4,7 @@
 
 The trick is a 1Password *Environment* mounted as a **named pipe**. The agent runs
 one line of shell, the values land in that shell's environment, and the model
-never sees them — not in the transcript, not in `argv`, not in a dotfile on disk.
+never sees them: not in the transcript, not in `argv`, not in a dotfile on disk.
 
 ```bash
 set -a; . "$HOME/.config/agent-secrets/.env"; set +a
@@ -17,16 +17,16 @@ The model wrote both lines. It has never seen the token, and never will.
 
 ## The problem
 
-An agent that can run shell commands needs credentials to be useful — deploy
+An agent that can run shell commands needs credentials to be useful: deploy
 keys, API tokens, a `sudo` password. Every obvious way of supplying them leaks:
 
 | Approach | Leak |
 |---|---|
 | Paste the secret into the chat | In the model's context and in the transcript, forever |
 | `export TOKEN=hunter2` in a tool call | Same, plus it's in the command the agent *wrote*, so it's in the context twice |
-| `curl -H "Authorization: Bearer $(op read op://...)"` | No leak into context, but `op read` re-prompts Touch ID on nearly every call (see below) |
+| `curl -H "Authorization: Bearer $(op read op://...)"` | No leak into context, but the value lands in `curl`'s `argv`, and `op read` re-prompts Touch ID on nearly every call (see below) |
 | A plaintext `.env` in the repo | On disk, in backups, one `cat .env` away from the context |
-| `TOKEN=$(cat secret.txt) ./deploy` | Value is in `argv` — visible in `ps` to every process on the box |
+| `./deploy --token "$(cat secret.txt)"` | Value is in `argv`, visible in `ps` to every process on the box |
 | An MCP tool that returns the secret | Tool results *are* context. This is the worst one, and the easiest to build by accident |
 
 What you actually want: the agent can **use** a credential but has no path to
@@ -80,10 +80,13 @@ Three properties do the work:
    `0`. There is nothing on disk to `cat` accidentally, nothing to land in a
    backup, nothing to commit. The 1Password desktop app re-serves the content
    on every open.
-2. **Sourcing puts values in the shell environment, not in `argv`.** They never
-   appear in `ps`, never appear in the command string the model wrote, and
-   never appear in the tool result unless the command itself prints them.
-3. **It needs no tty and no per-read biometric prompt** — only the 1Password
+2. **Sourcing puts values in the shell environment, not in `argv`.** The
+   *delivery* path never appears in `ps`, never appears in the command string the
+   model wrote, and never appears in the tool result unless the command itself
+   prints them. (What you then do with the variable is a separate question: a
+   `$VAR` interpolated into a command line does land in that process's `argv`.
+   See the threat model.)
+3. **It needs no tty and no per-read biometric prompt**, only the 1Password
    desktop app running and unlocked. That is what makes it usable from an agent
    harness, where every Bash call is a fresh non-interactive process.
 
@@ -107,8 +110,8 @@ Two details in it are worth stealing:
 - The value is **hex-encoded and piped to `security -i` on stdin**, so it never
   appears in `argv` even during the store.
 - `security -i` silently truncates its input line at 4096 bytes, which would
-  cache a corrupt entry that later reads serve without complaint — so oversized
-  secrets are deliberately **not cached**, just passed through.
+  cache a corrupt entry that later reads serve without complaint. Oversized
+  secrets are therefore deliberately **not cached**, just passed through.
 
 `op-cached` is the *fallback and bootstrap* path. Once the Environment is
 mounted, day-to-day agent work uses the FIFO and touches `op` not at all.
@@ -120,8 +123,8 @@ mounted, day-to-day agent work uses the FIFO and touches `op` not at all.
 Requirements: macOS, the 1Password desktop app (unlocked), the `op` CLI with
 "Integrate with 1Password CLI" enabled in Settings → Developer, and 1Password's
 Environments MCP server (enabled in the desktop app; in current builds it lives
-under Labs). Python 3.11+ for the TOML config — 3.9/3.10 work if you write the
-config as JSON.
+under Labs). Python 3.11+ for the TOML config (3.9/3.10 work if you write the
+config as JSON).
 
 **1. Install the reader.**
 
@@ -130,7 +133,7 @@ install -m 0755 op-cached ~/.local/bin/op-cached
 op-cached "op://Vault/some-item/password" >/dev/null && echo "reader ok"
 ```
 
-If you manage your Mac with nix-darwin / home-manager, don't vendor it — point
+If you manage your Mac with nix-darwin / home-manager, don't vendor it. Point
 at your own copy instead:
 
 ```nix
@@ -148,7 +151,7 @@ home.file.".local/bin/op-cached" = {
 cp example.config.toml config.toml
 ```
 
-Fill in `account_id` — `op account list --format=json` prints it. Leave
+Fill in `account_id`; `op account list --format=json` prints it. Leave
 `environment_id` for the next step. List your secrets under `[[variables]]`, each
 with the `op://` reference it comes from.
 
@@ -180,6 +183,11 @@ ls -l ~/.config/agent-secrets/.env    # expect: prw-------  ... 0 ...
 The leading `p` is the whole point. If you see `-rw-`, it is a regular file and
 you do not have this pattern.
 
+Two more subcommands are available for inspection: `./provision_env.py
+list-variables` prints the variable **names** in the Environment and no values
+(safe to let an agent run), and `./provision_env.py list-mounts` prints the local
+`.env` mounts for it.
+
 **6. Tell your agent the one line.**
 
 Put this in the project's `CLAUDE.md`, `AGENTS.md`, or equivalent:
@@ -187,7 +195,7 @@ Put this in the project's `CLAUDE.md`, `AGENTS.md`, or equivalent:
 > Secrets come from the mounted Environment at `~/.config/agent-secrets/.env`.
 > Read them with `set -a; . "$HOME/.config/agent-secrets/.env"; set +a` and use
 > the variables by name. Never print a value, never pass one on a command line,
-> never write one to a file. Available names: `EXAMPLE_API_TOKEN`, …
+> never write one to a file. Available names: `EXAMPLE_API_TOKEN`, ...
 
 Note the *names* belong in that file. The names are not secret and the agent
 needs them; the values are and it doesn't.
@@ -206,7 +214,7 @@ config on disk:
 }
 ```
 
-Add it with `claude mcp add-json` — plain `claude mcp add` drops the field.
+Add it with `claude mcp add-json`; plain `claude mcp add` drops the field.
 
 ---
 
@@ -218,7 +226,7 @@ Both will bite you eventually. Know them up front.
 ### 1. An Environment stores a *copy*, not a reference
 
 Putting a value in an Environment copies the literal string. It does **not**
-store an `op://` pointer that gets resolved on read — an `op://…` string written
+store an `op://` pointer that gets resolved on read: an `op://...` string written
 into a variable comes back through the mount verbatim, unresolved.
 
 Consequence: **rotating the vault item does not propagate.** The Environment
@@ -229,7 +237,7 @@ op-cached --refresh "op://Vault/item/field"   # bust the Keychain cache first
 ./provision_env.py provision --only THAT_VARIABLE
 ```
 
-...or edit the value in the 1Password app, which is cleaner — see caveat 2.
+...or edit the value in the 1Password app, which is cleaner (see caveat 2).
 
 ### 2. `append_variables` duplicates instead of updating
 
@@ -237,7 +245,7 @@ Appending a name that already exists adds a **second row**; it does not replace
 the first. The MCP server exposes no delete tool (`authenticate`,
 `append_variables`, `create_environment`, `rename_environment`,
 `list_environments`, `list_variables`, `create_local_env_file`,
-`list_local_env_files` — that's the whole surface).
+`list_local_env_files`; that's the whole surface).
 
 When a shell sources the mounted `.env`, later assignments overwrite earlier
 ones, so **the last occurrence wins** and a re-run does give you the new value.
@@ -250,12 +258,12 @@ population, and accept the duplicate row when you use it for rotation.
 ### 3. The provisioner is for humans, not agents
 
 The MCP `append_variables` tool takes the value as a *tool argument*. If an
-agent calls it, the plaintext secret is in the model's context — exactly what
+agent calls it, the plaintext secret is in the model's context, exactly what
 this whole repo exists to prevent. That is why provisioning is a script you run,
 which pipes JSON-RPC to the server in-process.
 
 (Having an agent call `append_variables` for a **freshly generated** token that
-the agent created and no one has yet stored is fine — nothing is being
+the agent created and no one has yet stored is fine: nothing is being
 exfiltrated. Using it to move an *existing* secret is not.)
 
 `list_variables` is safe for an agent: it returns names only.
@@ -282,36 +290,44 @@ sandbox.
 - **Secret in the transcript.** Chat logs, session files, and any telemetry built
   on them get variable names and exit codes. If a transcript is later shared,
   pasted into a bug report, or used as training data, there is no credential in it.
-- **Secret in `argv`.** Values are sourced into the environment, not interpolated
-  into command lines. `ps` shows nothing. `op-cached` maintains the same property
-  when writing to the Keychain.
+- **Secret in `argv` on the delivery path.** Values are sourced into the
+  environment rather than passed as arguments, so nothing in the *retrieval* step
+  shows up in `ps`. `op-cached` maintains the same property when writing to the
+  Keychain. (The *call site* is a different matter, see below.)
 - **Secret in a plaintext dotfile.** The mount is a FIFO: zero bytes on disk,
   nothing for a backup daemon, a file-sync client, an editor's recent-files
   index, or `git add -A` to pick up.
-- **An agent misreading its instructions and echoing config.** `cat`-ing the
-  mount is the one obvious mistake, and it prints the values — but the agent has
-  to actively do that, and it is trivially visible in the transcript when it
-  happens. Compare with a plaintext `.env`, where the same mistake is one
-  incidental `cat` during unrelated debugging.
 
 ### What it does NOT protect against
 
+- **The value at the call site.** Interpolating a sourced variable into a command
+  line (`curl -H "Authorization: Bearer $TOKEN"`, as in the example at the top of
+  this README) puts it straight back into that process's `argv`, where `ps` will
+  show it to any process on the box. The mount protects the *storage and delivery*
+  path, not what you do with the variable afterwards. Where it matters, pass the
+  value on stdin or via a config file the tool reads (`curl --config`, `-H @file`)
+  instead of on the command line.
 - **A compromised local machine.** If an attacker runs code as your user while
   1Password is unlocked, they can open the FIFO and read everything, and they can
   read the `op-cached` Keychain entries with the `security` CLI. There is no
   boundary here that a local attacker doesn't already sit inside.
 - **The agent itself, if it can run arbitrary shell.** It can `cat` the mount. It
   can `env`. It can source the file and `curl` the values to a server it picked.
-  This pattern removes the *accidental* leak into context; it does not sandbox a
+  Even the honest version of this bites: an agent that misreads its instructions
+  and `cat`s the mount to "check the config" prints every value into the context.
+  The one mitigation is that this has to be a deliberate, transcript-visible act,
+  where with a plaintext `.env` the same disclosure is one incidental `cat` during
+  unrelated debugging. So this pattern removes the *accidental* leak into context;
+  it does not sandbox a
   hostile or hijacked agent. If your threat model includes prompt injection
   driving deliberate exfiltration, you need command allowlisting, egress
   filtering, or a broker process that performs the authenticated action and never
-  hands the credential over — not this.
+  hands the credential over. Not this.
 - **Misuse of the credential.** An agent that can use a deploy key can deploy.
   Scope every credential to the least it can be scoped to, and prefer separate
   low-privilege items for agent use over sharing your own.
 - **Secrets in command *output*.** If the agent runs something that prints a
-  token — a verbose HTTP trace, `env`, a debug endpoint — that output goes
+  token (a verbose HTTP trace, `env`, a debug endpoint), that output goes
   straight into the context. The mount does nothing about it. Prefer `curl -sS`,
   and never `set -x` a block that touches these variables.
 - **`op-cached`'s Keychain cache.** Any process running as you can read those
