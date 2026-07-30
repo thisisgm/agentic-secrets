@@ -1,0 +1,80 @@
+#!/bin/zsh
+# op-cached: `op read` with a macOS Keychain cache.
+#
+# Vendored from the author's dotfiles (same author, MIT). That copy is the one
+# under home-manager management; this is a standalone copy so this repo needs
+# nothing else. Keep the two in sync if you edit either.
+#
+# Why this exists: 1Password CLI ties its authorization to a terminal session
+# (an ID based on the tty + start time). The authorization lasts 10 minutes of
+# inactivity with a 12-hour hard cap, and NONE of that is configurable
+# (https://developer.1password.com/docs/cli/app-integration-security/).
+# Agent and script `op read` calls have no stable tty, so every read looks
+# like a brand-new session and re-prompts Touch ID. This wrapper caches the
+# secret in the macOS login Keychain (encrypted at rest, never a plaintext
+# file) so one Touch ID unlock covers a whole work session.
+#
+# Usage:
+#   op-cached <op://vault/item/field>     print secret (cache-first)
+#   op-cached --refresh <op://ref>        force re-read from 1Password (rotation)
+#   op-cached --clear                     purge ALL cached secrets
+#
+# TTL: OP_CACHE_TTL seconds, default 28800 (8h).
+#
+# Security model: the cache entry is readable by any process running as this
+# user via the `security` CLI while the login Keychain is unlocked. That is a
+# deliberate trade against authorization fatigue; scope is limited to the few
+# cached fields, bounded by TTL, and wiped with --clear.
+
+set -o pipefail
+SVC="op-cache"
+TTL="${OP_CACHE_TTL:-28800}"
+
+if [[ "$1" == "--clear" ]]; then
+  n=0
+  while security delete-generic-password -s "$SVC" >/dev/null 2>&1; do n=$((n+1)); done
+  echo "op-cached: cleared $n cached secret(s)" >&2
+  exit 0
+fi
+
+refresh=0
+if [[ "$1" == "--refresh" ]]; then refresh=1; shift; fi
+ref="$1"
+if [[ "$ref" != op://* ]]; then
+  echo "usage: op-cached [--refresh] <op://vault/item/field> | op-cached --clear" >&2
+  exit 2
+fi
+
+acct=$(printf '%s' "$ref" | shasum -a 256 | cut -d' ' -f1)
+now=$(date +%s)
+
+if (( ! refresh )); then
+  entry=$(security find-generic-password -s "$SVC" -a "$acct" -w 2>/dev/null)
+  if [[ -n "$entry" ]]; then
+    ts="${entry%%:*}"
+    if [[ "$ts" == <-> ]] && (( now - ts < TTL )); then
+      printf '%s' "${entry#*:}" | xxd -r -p
+      exit 0
+    fi
+  fi
+fi
+
+secret=$(op read "$ref") || {
+  echo "op-cached: op read failed (1Password locked? CLI integration off? run 'op whoami' in a real terminal)" >&2
+  exit 1
+}
+
+# hex-encode so the stored value is plain [0-9a-f:] regardless of password charset;
+# feed the command to `security -i` via stdin so the secret never appears in argv.
+# `security -i` truncates its input line at 4096 bytes and would store a corrupt
+# entry that later cache hits serve silently, so oversized secrets stay uncached.
+hex=$(printf '%s' "$secret" | xxd -p | tr -d '\n')
+if (( ${#hex} > 3800 )); then
+  echo "op-cached: secret too large to cache safely; serving uncached" >&2
+else
+  printf 'add-generic-password -U -s "%s" -a "%s" -w "%s:%s"\n' "$SVC" "$acct" "$now" "$hex" | security -i >/dev/null 2>&1 || {
+    security delete-generic-password -s "$SVC" -a "$acct" >/dev/null 2>&1
+    echo "op-cached: keychain store failed, partial entry dropped (secret still printed below)" >&2
+  }
+fi
+printf '%s' "$secret"

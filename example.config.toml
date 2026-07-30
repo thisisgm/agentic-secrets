@@ -1,0 +1,66 @@
+# example.config.toml -- copy to config.toml and fill in your own values.
+#
+# Nothing in this file is a secret. It holds identifiers and op:// references
+# only; the values themselves never leave 1Password except through the reader
+# subprocess. config.toml is gitignored anyway, because the op:// refs contain
+# your vault item ids and there is no reason to publish those.
+
+# Your 1Password account id.
+#   op account list --format=json      # take the account uuid field
+# or read it off the account in the desktop app.
+account_id = "YOUR_ACCOUNT_ID"
+
+# The Environment to write into.
+#   ./provision_env.py list-environments          # to find an existing one
+#   ./provision_env.py create-environment my-env  # to make a new one
+environment_id = "YOUR_ENVIRONMENT_ID"
+
+# The Environment's display name. Required by the MCP mount call, and it is
+# what shows up in the 1Password app under Developer > Environments.
+environment_name = "agent-secrets"
+
+# Where the .env mount lives. `provision_env.py mount` creates the parent
+# directory 0700 and asks 1Password to mount here. The result is a named pipe
+# (FIFO), not a file: zero bytes on disk, re-served on every open.
+mount_path = "~/.config/agent-secrets/.env"
+
+# The local secret reader. Takes one op:// ref on argv, prints the value on
+# stdout. The bundled `op-cached` caches in the macOS login Keychain so you get
+# one Touch ID prompt per work session instead of one per read.
+# Plain `op read` works too if you do not mind the prompts:
+#   reader = "/usr/local/bin/op-read-shim"
+reader = "~/.local/bin/op-cached"
+
+# How to launch 1Password's Environments MCP server. Override if it is not on
+# PATH. A string is split with shell-style quoting; a list is used verbatim.
+mcp_command = ["1password-mcp"]
+
+# Seconds to wait for any single MCP response. The `authenticate` call blocks
+# on you clicking approve in the 1Password app, so keep this generous.
+timeout = 120
+
+# ---------------------------------------------------------------------------
+# The variables. Each one is a name your scripts will read from the
+# environment, plus the op:// reference the value comes from.
+#
+# `concealed = true` marks the value as hidden in the 1Password UI. Use it for
+# anything that is actually a secret; set it to false only for non-sensitive
+# companions like a hostname or a username you want to keep alongside.
+#
+# Names must be unique -- see CAVEAT 2 in the README about duplicate rows.
+# ---------------------------------------------------------------------------
+
+[[variables]]
+name = "EXAMPLE_API_TOKEN"
+ref = "op://Vault/example-item-id/credential"
+concealed = true
+
+[[variables]]
+name = "EXAMPLE_DB_PASSWORD"
+ref = "op://Vault/another-example-item-id/password"
+concealed = true
+
+[[variables]]
+name = "EXAMPLE_SERVICE_USER"
+ref = "op://Vault/another-example-item-id/username"
+concealed = false

@@ -1,0 +1,22 @@
+# Your filled-in config. Not secret in itself, but it carries your account id,
+# environment id, and vault item ids. No reason to publish those.
+config.toml
+config.json
+*.local.toml
+*.local.json
+
+# Never commit a materialized .env. The whole point is that it is a mount,
+# not a file -- but a stray copy or a `cat > .env` would be a real leak.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# editor / OS cruft
+.DS_Store
+*.swp
